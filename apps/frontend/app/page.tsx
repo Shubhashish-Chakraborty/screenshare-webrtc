@@ -26,7 +26,7 @@ export default function App() {
 
     // Initialize socket connection
     useEffect(() => {
-        const socket = io('http://localhost:3001');
+        const socket = io(`${process.env.NEXT_PUBLIC_SOCKET_URL}`);
         socketRef.current = socket;
 
         return () => {
