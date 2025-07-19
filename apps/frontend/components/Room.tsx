@@ -8,6 +8,19 @@ type RemoteStreams = {
         audio: MediaStream | null;
     };
 };
+const useFullscreen = () => {
+    const toggleFullscreen = (element: HTMLElement) => {
+        if (!document.fullscreenElement) {
+            element.requestFullscreen().catch(err => {
+                console.error(`Error attempting to enable fullscreen: ${err.message}`);
+            });
+        } else {
+            document.exitFullscreen();
+        }
+    };
+
+    return { toggleFullscreen };
+};
 
 export default function RoomComponent({ params }: { params: { id: string } }) {
     const roomId = params.id;
@@ -15,6 +28,7 @@ export default function RoomComponent({ params }: { params: { id: string } }) {
     const [isSharing, setIsSharing] = useState(false);
     const [isMicOn, setIsMicOn] = useState(false);
     const [remoteStreams, setRemoteStreams] = useState<RemoteStreams>({});
+    const { toggleFullscreen } = useFullscreen();
 
     const socketRef = useRef<Socket | null>(null);
     const peersRef = useRef<{ [peerId: string]: RTCPeerConnection }>({});
@@ -22,6 +36,8 @@ export default function RoomComponent({ params }: { params: { id: string } }) {
     const localAudioStreamRef = useRef<MediaStream | null>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const localAudioRef = useRef<HTMLAudioElement>(null);
+
+
 
     // Initialize socket connection
     useEffect(() => {
@@ -297,12 +313,54 @@ export default function RoomComponent({ params }: { params: { id: string } }) {
                     </div>
 
                     {/* Remote streams */}
+
                     {Object.entries(remoteStreams).map(([peerId, streams]) => (
+                        <div key={peerId} className="bg-white p-4 rounded shadow relative group">
+                            <h2 className="font-semibold mb-2">User: {peerId}</h2>
+                            {streams.video && (
+                                <div className="relative">
+                                    <video
+                                        ref={ref => {
+                                            if (ref) {
+                                                ref.srcObject = streams.video;
+                                            }
+                                        }}
+                                        autoPlay
+                                        playsInline
+                                        className="w-full h-auto border rounded cursor-pointer"
+                                        onClick={(e) => toggleFullscreen(e.currentTarget)}
+                                    />
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            const video = e.currentTarget.parentElement?.querySelector('video');
+                                            if (video) toggleFullscreen(video);
+                                        }}
+                                        className="absolute bottom-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            )}
+                            <audio
+                                ref={ref => {
+                                    if (ref && streams.audio) {
+                                        ref.srcObject = streams.audio;
+                                    }
+                                }}
+                                autoPlay
+                            />
+                        </div>
+                    ))}
+
+                    {/* {Object.entries(remoteStreams).map(([peerId, streams]) => (
                         <div key={peerId} className="bg-white p-4 rounded shadow">
                             <h2 className="font-semibold mb-2">User: {peerId}</h2>
                             {streams.video && (
                                 <video
-                                    
+
                                     ref={ref => {
                                         if (ref) {
                                             ref.srcObject = streams.video;
@@ -322,7 +380,7 @@ export default function RoomComponent({ params }: { params: { id: string } }) {
                                 autoPlay
                             />
                         </div>
-                    ))}
+                    ))} */}
                 </div>
             </div>
         </div>
