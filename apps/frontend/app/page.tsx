@@ -3,18 +3,26 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 type Peers = Record<string, RTCPeerConnection>;
+type RemoteStreams = {
+    video: MediaStream | null;
+    audio: MediaStream | null;
+};
 
 export default function App() {
     const [roomId, setRoomId] = useState('');
     const [userId] = useState(`user-${Math.random().toString(36).substring(2, 9)}`);
     const [isSharing, setIsSharing] = useState(false);
     const [isInRoom, setIsInRoom] = useState(false);
-    const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+    const [isMicOn, setIsMicOn] = useState(false);
+    const [remoteStreams, setRemoteStreams] = useState<Record<string, RemoteStreams>>({});
 
     const socketRef = useRef<Socket | null>(null);
-    const localStreamRef = useRef<MediaStream | null>(null);
+    const localVideoStreamRef = useRef<MediaStream | null>(null);
+    const localAudioStreamRef = useRef<MediaStream | null>(null);
     const peersRef = useRef<Peers>({});
     const localVideoRef = useRef<HTMLVideoElement>(null);
+    const localAudioRef = useRef<HTMLAudioElement>(null);
+    const remoteAudioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
 
     // Initialize socket connection
     useEffect(() => {
@@ -46,16 +54,41 @@ export default function App() {
         };
 
         peer.ontrack = (event) => {
-            setRemoteStreams(prev => ({
-                ...prev,
-                [peerId]: event.streams[0],
-            }));
+            const streamType = event.track.kind === 'video' ? 'video' : 'audio';
+
+            setRemoteStreams(prev => {
+                const existing = prev[peerId] || { video: null, audio: null };
+
+                // Create new stream or add track to existing stream
+                let stream: MediaStream;
+                if (existing[streamType]) {
+                    stream = existing[streamType]!;
+                    stream.addTrack(event.track);
+                } else {
+                    stream = new MediaStream([event.track]);
+                }
+
+                return {
+                    ...prev,
+                    [peerId]: {
+                        ...existing,
+                        [streamType]: stream
+                    }
+                };
+            });
         };
 
-        // Add local stream tracks if available
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => {
-                peer.addTrack(track, localStreamRef.current!);
+        // Add local video tracks if available
+        if (localVideoStreamRef.current) {
+            localVideoStreamRef.current.getTracks().forEach(track => {
+                peer.addTrack(track, localVideoStreamRef.current!);
+            });
+        }
+
+        // Add local audio tracks if available
+        if (localAudioStreamRef.current) {
+            localAudioStreamRef.current.getTracks().forEach(track => {
+                peer.addTrack(track, localAudioStreamRef.current!);
             });
         }
 
@@ -63,17 +96,58 @@ export default function App() {
         return peer;
     }, []);
 
+    // Toggle microphone
+    const toggleMic = async () => {
+        if (isMicOn) {
+            // Stop microphone
+            if (localAudioStreamRef.current) {
+                localAudioStreamRef.current.getTracks().forEach(track => track.stop());
+                localAudioStreamRef.current = null;
+            }
+            setIsMicOn(false);
+        } else {
+            // Start microphone
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                localAudioStreamRef.current = stream;
+                setIsMicOn(true);
+
+                if (localAudioRef.current) {
+                    localAudioRef.current.srcObject = stream;
+                }
+
+                // Add audio track to all existing peer connections
+                for (const peerId in peersRef.current) {
+                    const peer = peersRef.current[peerId];
+                    stream.getTracks().forEach(track => {
+                        peer.addTrack(track, stream);
+                    });
+
+                    // Renegotiate connection
+                    const offer = await peer.createOffer();
+                    await peer.setLocalDescription(offer);
+                    socketRef.current?.emit('offer', {
+                        to: peerId,
+                        offer,
+                    });
+                }
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+            }
+        }
+    };
+
     // Start screen sharing
     const startSharing = async () => {
         try {
-            // Get display media
+            // Get display media (screen + optional audio)
             const stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
-                audio: true,
+                audio: false, // We'll handle audio separately
             });
 
             // Store the stream and update state
-            localStreamRef.current = stream;
+            localVideoStreamRef.current = stream;
             setIsSharing(true);
 
             // Set the stream to the local video element
@@ -112,9 +186,9 @@ export default function App() {
 
     // Stop screen sharing
     const stopSharing = useCallback(() => {
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => track.stop());
-            localStreamRef.current = null;
+        if (localVideoStreamRef.current) {
+            localVideoStreamRef.current.getTracks().forEach(track => track.stop());
+            localVideoStreamRef.current = null;
 
             if (localVideoRef.current) {
                 localVideoRef.current.srcObject = null;
@@ -136,6 +210,12 @@ export default function App() {
     const leaveRoom = () => {
         if (socketRef.current && roomId) {
             stopSharing();
+            if (localAudioStreamRef.current) {
+                localAudioStreamRef.current.getTracks().forEach(track => track.stop());
+                localAudioStreamRef.current = null;
+            }
+            setIsMicOn(false);
+
             socketRef.current.emit('leave-room', roomId, userId);
 
             // Close all peer connections
@@ -217,7 +297,7 @@ export default function App() {
             <div className="max-w-7xl mx-auto">
                 <header className="mb-6 text-center">
                     <h1 className="text-4xl font-bold text-cyan-400">Collaborate</h1>
-                    <p className="text-gray-400">Real-time Screen Sharing</p>
+                    <p className="text-gray-400">Real-time Screen Sharing & Voice Chat</p>
                 </header>
 
                 <div className="bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
@@ -251,24 +331,35 @@ export default function App() {
                 </div>
 
                 {isInRoom && (
-                    <div className="text-center mb-6">
+                    <div className="flex flex-wrap gap-4 justify-center mb-6">
                         {!isSharing ? (
                             <button
                                 onClick={startSharing}
-                                className="bg-green-500 text-white px-8 py-3 rounded-lg font-semibold hover:bg-green-600 transition-colors duration-300 shadow-lg"
+                                className="bg-green-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-600 transition-colors duration-300 shadow-lg"
                             >
                                 Start Sharing Screen
                             </button>
                         ) : (
                             <button
                                 onClick={stopSharing}
-                                className="bg-yellow-500 text-white px-8 py-3 rounded-lg font-semibold hover:bg-yellow-600 transition-colors duration-300 shadow-lg"
+                                className="bg-yellow-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-yellow-600 transition-colors duration-300 shadow-lg"
                             >
                                 Stop Sharing
                             </button>
                         )}
+
+                        <button
+                            onClick={toggleMic}
+                            className={`px-6 py-3 rounded-lg font-semibold transition-colors duration-300 shadow-lg ${isMicOn ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'
+                                }`}
+                        >
+                            {isMicOn ? 'Mute Mic' : 'Unmute Mic'}
+                        </button>
                     </div>
                 )}
+
+                {/* Hidden audio element for local audio (echo cancellation) */}
+                <audio ref={localAudioRef} autoPlay muted />
 
                 <main className="bg-gray-800 p-6 rounded-xl shadow-lg">
                     <h2 className="text-2xl font-semibold mb-4 text-cyan-300 border-b border-gray-700 pb-2">Shared Screens</h2>
@@ -288,25 +379,39 @@ export default function App() {
                         )}
 
                         {/* Remote screens */}
-                        {Object.keys(remoteStreams).map((peerId) => (
+                        {Object.entries(remoteStreams).map(([peerId, streams]) => (
                             <div key={peerId} className="bg-gray-700 p-3 rounded-lg">
-                                <h3 className="font-medium mb-2 text-center text-gray-300">Screen from <span className="font-mono text-sm">{peerId}</span></h3>
-                                <video
+                                <h3 className="font-medium mb-2 text-center text-gray-300">
+                                    {streams.video ? 'Screen' : 'Audio'} from <span className="font-mono text-sm">{peerId}</span>
+                                </h3>
+                                {streams.video && (
+                                    <video
+                                        ref={(ref) => {
+                                            if (ref && streams.video) {
+                                                ref.srcObject = streams.video;
+                                            }
+                                        }}
+                                        autoPlay
+                                        playsInline
+                                        className="w-full h-auto border-2 border-gray-600 rounded-lg"
+                                    />
+                                )}
+                                {/* Audio element for each remote user */}
+                                <audio
                                     ref={(ref) => {
-                                        if (ref && remoteStreams[peerId]) {
-                                            ref.srcObject = remoteStreams[peerId];
+                                        remoteAudioRefs.current[peerId] = ref;
+                                        if (ref && streams.audio) {
+                                            ref.srcObject = streams.audio;
                                         }
                                     }}
                                     autoPlay
-                                    playsInline
-                                    className="w-full h-auto border-2 border-gray-600 rounded-lg"
                                 />
                             </div>
                         ))}
                     </div>
                     {isInRoom && Object.keys(remoteStreams).length === 0 && !isSharing && (
                         <div className="text-center py-10 text-gray-500">
-                            <p>Waiting for others to share their screen...</p>
+                            <p>Waiting for others to join...</p>
                         </div>
                     )}
                 </main>
